@@ -1,4 +1,4 @@
-from rete import ReteNeurale
+from rete import Actor,Critic
 import tensorflow as tf
 
 class ActorCriticPPO():
@@ -13,7 +13,7 @@ class ActorCriticPPO():
                 self.actor=tf.keras.models.load_model(self.weightsActorPath)
                 self.modelLoaded=True
             if self.weightsCriticPath is not None:
-                self.critic=tf.keras.models.load_model(self.weightsActorPath)
+                self.critic=tf.keras.models.load_model(self.weightsCriticPath)
                 self.modelLoaded=self.modelLoaded and True
             print("ACTOR CRITIC LOADED")
         except Exception as e:
@@ -23,8 +23,8 @@ class ActorCriticPPO():
             self.modelLoaded=False
 
         if self.modelLoaded==False:
-            self.actor=ReteNeurale(dim_in=self.dim_in,dim_out=self.dim_out,name="actor_ppo")
-            self.critic=ReteNeurale(dim_in=self.dim_in,dim_out=1,name="critic_ppo")
+            self.actor=Actor(name="actor_ppo")
+            self.critic=Critic(name="critic_ppo")
             self.critic.compile(optimizer=optimizer)
             self.actor.compile(optimizer=optimizer)        
 
@@ -37,6 +37,19 @@ class ActorCriticPPO():
     def forward(self,batch_obs):
         policy=self.actor(batch_obs)
         value=self.critic(batch_obs)
+        try:
+                tf.debugging.check_numerics(policy, "POLICY has nan or inf values")
+        except:
+                print("POLICY HAS NAN OR INF VALUES")
+                print(policy)
+                
+        try:
+                tf.debugging.check_numerics(value, "VALUE has nan or inf values")
+        except:
+                print("VALUE HAS NAN OR INF VALUES")
+                print(value)
+                
+                    
         return policy,value
     
 

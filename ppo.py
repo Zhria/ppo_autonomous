@@ -12,8 +12,8 @@ class PPO(tf.keras.Model):
         #Training
         self.gamma=0.99   # discount factor
         self.lam=0.97   # lambda factor for GAE
-        self.nSteps=1024 #Steps per epoch
-        self.nMiniBatches=4 #Num mini batches per grad. descent step
+        self.nSteps=2048 #Steps per epoch
+        self.nMiniBatches=10 #Num mini batches per grad. descent step
         self.nBatchTrain=self.nSteps//self.nMiniBatches
         self.nEpochs=200 # Number of epochs to run
         self.saveWeightsFreq=5 #Save every n epochs
@@ -24,7 +24,6 @@ class PPO(tf.keras.Model):
         
 
         #Policy
-        self.lr=0.001
         self.clip_grads=0.5 # value for gradient clipping
         self.epsilon=0.2
         self.valueCoefficient= 0.5  # Value coef for backprop
@@ -45,15 +44,13 @@ class PPO(tf.keras.Model):
         
         
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate= self.lr, clipnorm=self.clip_grads)
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate= self.learningRate, clipnorm=self.clip_grads)
         self.weightOptimizerPath="./weights/"+gameName+"/opt"
         
 
         if weightsPath is None:
             if not os.path.exists("./weights/"+gameName):
                 os.makedirs("./weights/"+gameName)
-#            self.weightsActorPath="./weights/"+gameName+"/actor.weights.h5"
- #           self.weightsCriticPath="./weights/"+gameName+"/critic.weights.h5"
             self.weightsActorPath="./weights/"+gameName+"/actor.keras"
             self.weightsCriticPath="./weights/"+gameName+"/critic.keras"
 
@@ -68,7 +65,6 @@ class PPO(tf.keras.Model):
         logits,values=self.ActorCritic.forward(batch_obs)
         if deterministic:
             actions=tf.argmax(tf.nn.softmax(logits), axis=-1)
-            print("Action: ",np.squeeze(actions) ," Con probability: ",np.squeeze(tf.nn.softmax(logits))[actions]*100)
         else:
             actions=tf.squeeze(tf.random.categorical(logits, 1), axis=-1)
         logp_t=self.logp(logits,actions)
@@ -116,6 +112,7 @@ class PPO(tf.keras.Model):
             obs=self.lastObs
         len_last_ep=0
         i=0
+        last_done=False
         for step in range(self.nSteps):
             action,logp_t,value,_=self.getActionAndLogProb(obs)
             obs,rew,done,_=self.env.step(action)
@@ -128,6 +125,7 @@ class PPO(tf.keras.Model):
             batch_dones.append(done)
             self.lastDoneEnv=done
             self.lastObs=obs
+            last_done=done
             if done:
                 batch_ep_rews.append(batch_rews)
                 print("Reward per episode: ",np.sum(batch_rews)," Episode length: ",step-len_last_ep)                
@@ -138,10 +136,10 @@ class PPO(tf.keras.Model):
                 frames=[]
                 i+=1
         
-        _,_,last_values,_=self.getActionAndLogProb(obs)
+        _,_,last_values,_=self.getActionAndLogProb(self.lastObs)
 
         #reward normalization
-        batch_rews= (batch_rews - tf.math.reduce_mean(batch_rews)) / (tf.math.reduce_std(batch_rews))
+        #batch_rews= (batch_rews - tf.math.reduce_mean(batch_rews)) / (tf.math.reduce_std(batch_rews))
 
 
         #Calc advantages and returns
@@ -150,8 +148,9 @@ class PPO(tf.keras.Model):
         last_gae_lam = 0
         for t in reversed(range(self.nSteps)):
             if t == self.nSteps - 1:
-                next_non_terminal = 1.0 - done
+                next_non_terminal = 1.0 - last_done
                 next_values = last_values
+                #next_values = 0
             else:
                 next_non_terminal = 1.0 - batch_dones[t + 1]
                 next_values = batch_values[t + 1]
@@ -160,7 +159,7 @@ class PPO(tf.keras.Model):
             advs[t] = last_gae_lam = delta + self.gamma * self.lam * next_non_terminal * last_gae_lam
             
         returns = advs + batch_values                         # ADV = RETURNS - VALUES
-        advs = (advs - advs.mean()) / (advs.std())      # Normalize ADVs
+        #advs = (advs - advs.mean()) / (advs.std())      # Normalize ADVs
 
         return tf.convert_to_tensor(batch_obs, dtype=tf.uint8) ,tf.convert_to_tensor(batch_actions) ,tf.reshape(tf.convert_to_tensor(batch_logp,dtype=tf.float32),[-1]), tf.convert_to_tensor(returns), tf.convert_to_tensor(advs)
     
@@ -170,7 +169,6 @@ class PPO(tf.keras.Model):
         logp=self.logp(logits,actions)
         logp=tf.reshape(tf.convert_to_tensor(logp,dtype=tf.float32),shape=[-1])
         ratio = tf.exp(logp - logp_old)
-        print(ratio)
         approx_kl = tf.reduce_mean(logp_old - logp)                                     # Approximated  Kullback Leibler Divergence from OLD and NEW Policy
         clipped_ratio =tf.clip_by_value(ratio, clip_value_min=1.0-self.epsilon, clip_value_max=1.0+self.epsilon)
         entropy_loss=self.entropy(logits)
@@ -179,6 +177,7 @@ class PPO(tf.keras.Model):
         policy_loss=-tf.reduce_mean(clipped_loss)+entropy_loss
         value_loss=tf.reduce_mean(tf.square(returns - values)) * 0.5 * self.valueCoefficient
         total_loss=policy_loss+value_loss
+        print("Total loss: ",total_loss.numpy()," Policy loss: ",policy_loss.numpy()," Value loss: ",value_loss.numpy()," Entropy loss: ",entropy_loss.numpy())
         return total_loss, approx_kl
     
 
@@ -220,7 +219,6 @@ class PPO(tf.keras.Model):
             logp_t_batch = logp_t[start:end]
            
             total_loss,approx_kl = self.applyGradients(obs_batch,actions_batch,logp_t_batch,advs_batch,returns_batch)
-            print("TOTAL LOSS: ",total_loss)
 
             means.append([total_loss, approx_kl])                                       # keep order in list for return later
         
@@ -233,7 +231,6 @@ class PPO(tf.keras.Model):
     def applyGradients(self, obs, actions, logp_old,advs, returns):
         with tf.GradientTape() as tape:
             total_loss,approx_kl= self.losses(obs, logp_old, actions, advs, returns)
-            print("Total Loss: ",total_loss)
         trainable_variables = self.ActorCritic.get_trainable_variables()                            # take all trainable variables into account
         grads = tape.gradient(total_loss, trainable_variables)              
         #grads, grad_norm = tf.clip_by_global_norm(grads, self.clip_grads)               # clip gradients for slight updates
