@@ -4,7 +4,7 @@ from ac_ppo import ActorCriticPPO
 import os
 
 class PPO(tf.keras.Model):
-    def __init__(self,env,weightsPath,recorder,dataLogger,gameName):
+    def __init__(self,env,weightsPath,recorder,dataLogger,gameName,training=True):
         """
         HYPER PARAMETERS        
         """
@@ -12,10 +12,10 @@ class PPO(tf.keras.Model):
         #Training
         self.gamma=0.99   # discount factor
         self.lam=0.97   # lambda factor for GAE
-        self.nSteps=2048 #Steps per epoch
-        self.nMiniBatches=10 #Num mini batches per grad. descent step
+        self.nSteps=4096 #Steps per epoch
+        self.nMiniBatches=12 #Num mini batches per grad. descent step
         self.nBatchTrain=self.nSteps//self.nMiniBatches
-        self.nEpochs=200 # Number of epochs to run
+        self.nEpochs=35# Number of epochs to run
         self.saveWeightsFreq=5 #Save every n epochs
 
         self.lastDoneEnv=False #Used to avoid Warning message Warning: early reset ignored        
@@ -27,19 +27,21 @@ class PPO(tf.keras.Model):
         self.clip_grads=0.5 # value for gradient clipping
         self.epsilon=0.2
         self.valueCoefficient= 0.5  # Value coef for backprop
-        self.entropyCoeffiecient=0.3
+        self.entropyCoeffiecient=0.02
         self.learningRate=3e-4
         self.trainIterations=5 # pi and v update iterations for backprop
         self.target_kl=0.02 # target kl divergence
         """
         END HYPER PARAMETERS
         """
-      
+        self.training=training #If training is False the model is used for evaluation
         self.env=env
         self.nActions=env.action_space.n
-
-        self.recorder=recorder
-        self.dataLogger=dataLogger
+        self.recorder=None
+        self.dataLogger=None
+        if training:
+            self.recorder=recorder
+            self.dataLogger=dataLogger
         self.gameName=gameName
         
         
@@ -55,10 +57,8 @@ class PPO(tf.keras.Model):
             self.weightsCriticPath="./weights/"+gameName+"/critic.keras"
 
         else:
-            if not os.path.exists(weightsPath+"/"+gameName):
-                os.makedirs(weightsPath+"/"+gameName)
-            self.weightsActorPath=weightsPath+"/"+gameName+"/actor.weights.h5"
-            self.weightsCriticPath=weightsPath+"/"+gameName+"/critic.weights.h5"
+            self.weightsActorPath=weightsPath+"/actor.keras"
+            self.weightsCriticPath=weightsPath+"/critic.keras"
         self.ActorCritic=ActorCriticPPO(env,self.optimizer,weigthsActor=self.weightsActorPath, weigthsCritic=self.weightsCriticPath)
 
     def getActionAndLogProb(self, batch_obs, deterministic=False):
@@ -128,7 +128,6 @@ class PPO(tf.keras.Model):
             last_done=done
             if done:
                 batch_ep_rews.append(batch_rews)
-                print("Reward per episode: ",np.sum(batch_rews)," Episode length: ",step-len_last_ep)                
                 batch_ep_lens.append(step-len_last_ep)
                 len_last_ep=step
                 obs=self.env.reset()
@@ -137,10 +136,7 @@ class PPO(tf.keras.Model):
                 i+=1
         
         _,_,last_values,_=self.getActionAndLogProb(self.lastObs)
-
-        #reward normalization
-        #batch_rews= (batch_rews - tf.math.reduce_mean(batch_rews)) / (tf.math.reduce_std(batch_rews))
-
+        print("Reward rollout: ",np.sum(batch_rews))
 
         #Calc advantages and returns
         returns = np.zeros_like(batch_rews)
@@ -150,7 +146,6 @@ class PPO(tf.keras.Model):
             if t == self.nSteps - 1:
                 next_non_terminal = 1.0 - last_done
                 next_values = last_values
-                #next_values = 0
             else:
                 next_non_terminal = 1.0 - batch_dones[t + 1]
                 next_values = batch_values[t + 1]
@@ -159,8 +154,11 @@ class PPO(tf.keras.Model):
             advs[t] = last_gae_lam = delta + self.gamma * self.lam * next_non_terminal * last_gae_lam
             
         returns = advs + batch_values                         # ADV = RETURNS - VALUES
-        #advs = (advs - advs.mean()) / (advs.std())      # Normalize ADVs
+        advs = (advs - advs.mean()) / (advs.std())      # Normalize ADVs
 
+        if np.sum(batch_rews)==0:
+            print("No rewards in this epoch") #This should never happen. If it happens i need another rollout because with this rollout the model cannot learn
+            self.rollout()
         return tf.convert_to_tensor(batch_obs, dtype=tf.uint8) ,tf.convert_to_tensor(batch_actions) ,tf.reshape(tf.convert_to_tensor(batch_logp,dtype=tf.float32),[-1]), tf.convert_to_tensor(returns), tf.convert_to_tensor(advs)
     
 
@@ -174,9 +172,9 @@ class PPO(tf.keras.Model):
         entropy_loss=self.entropy(logits)
         clipped_loss = tf.minimum(ratio * advs, clipped_ratio * advs)
 
-        policy_loss=-tf.reduce_mean(clipped_loss)+entropy_loss
+        policy_loss=-tf.reduce_mean(clipped_loss)
         value_loss=tf.reduce_mean(tf.square(returns - values)) * 0.5 * self.valueCoefficient
-        total_loss=policy_loss+value_loss
+        total_loss=policy_loss+value_loss+entropy_loss
         print("Total loss: ",total_loss.numpy()," Policy loss: ",policy_loss.numpy()," Value loss: ",value_loss.numpy()," Entropy loss: ",entropy_loss.numpy())
         return total_loss, approx_kl
     
@@ -220,7 +218,7 @@ class PPO(tf.keras.Model):
            
             total_loss,approx_kl = self.applyGradients(obs_batch,actions_batch,logp_t_batch,advs_batch,returns_batch)
 
-            means.append([total_loss, approx_kl])                                       # keep order in list for return later
+            means.append([total_loss, approx_kl])
         
         means = np.asarray(means)
         means = np.mean(means, axis= 0)
@@ -233,14 +231,13 @@ class PPO(tf.keras.Model):
             total_loss,approx_kl= self.losses(obs, logp_old, actions, advs, returns)
         trainable_variables = self.ActorCritic.get_trainable_variables()                            # take all trainable variables into account
         grads = tape.gradient(total_loss, trainable_variables)              
-        #grads, grad_norm = tf.clip_by_global_norm(grads, self.clip_grads)               # clip gradients for slight updates
 
         self.optimizer.apply_gradients(zip(grads, trainable_variables))                 # Backprop gradients through network
 
         return total_loss, approx_kl
 
 
-    def evaluate_model(self,episode=10):
+    def evaluate_model(self,episode=10,deterministic=True):
         total_rewards = []
         for i in range(episode):
             frames=[]
@@ -249,29 +246,31 @@ class PPO(tf.keras.Model):
             done = False
             cumulative_reward = 0
             while not done:
-                action, _,_,_= self.getActionAndLogProb(state,deterministic=True)
+                action, _,_,_= self.getActionAndLogProb(state,deterministic=deterministic)
                 next_state, reward, done, _ =self.env.step(action)
                 state=next_state
                 frames.append(state)
                 cumulative_reward += reward
             total_rewards.append(cumulative_reward)
-            self.recorder.saveRecord(frames,i,True)
+            if self.training:
+                self.recorder.saveRecord(frames,i,True)
             
             print("Episode reward:", cumulative_reward)
+
         print(f"Average Reward: {np.mean(total_rewards):.2f}")
         print(f"Min Reward: {np.min(total_rewards):.2f}")
         print(f"Max Reward: {np.max(total_rewards):.2f}")
         print(f"Cumulative Reward: {np.sum(total_rewards):.2f}")
-        self.dataLogger.log({
-            "reward":np.mean(total_rewards),
-            "minReward":np.min(total_rewards),
-            "maxReward":np.max(total_rewards),
-            "totalReward":np.sum(total_rewards)
-        })
+        if self.training:
+            self.dataLogger.log({
+                "reward":np.mean(total_rewards),
+                "minReward":np.min(total_rewards),
+                "maxReward":np.max(total_rewards),
+                "totalReward":np.sum(total_rewards)
+            })
 
         return np.mean(total_rewards),np.min(total_rewards),np.max(total_rewards),np.sum(total_rewards)
     
-
 
     def save_model(self,epoch):
         if epoch % self.saveWeightsFreq == 0:
