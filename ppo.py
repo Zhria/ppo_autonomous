@@ -27,7 +27,7 @@ class PPO(tf.keras.Model):
         self.clip_grads=0.5 # value for gradient clipping
         self.epsilon=0.2
         self.valueCoefficient= 0.5  # Value coef for backprop
-        self.entropyCoeffiecient=0.02
+        self.entropyCoeffiecient=0.020
         self.learningRate=3e-4
         self.trainIterations=5 # pi and v update iterations for backprop
         self.target_kl=0.02 # target kl divergence
@@ -158,7 +158,7 @@ class PPO(tf.keras.Model):
 
         if np.sum(batch_rews)==0:
             print("No rewards in this epoch") #This should never happen. If it happens i need another rollout because with this rollout the model cannot learn
-            self.rollout()
+        #    self.rollout()
         return tf.convert_to_tensor(batch_obs, dtype=tf.uint8) ,tf.convert_to_tensor(batch_actions) ,tf.reshape(tf.convert_to_tensor(batch_logp,dtype=tf.float32),[-1]), tf.convert_to_tensor(returns), tf.convert_to_tensor(advs)
     
 
@@ -175,7 +175,7 @@ class PPO(tf.keras.Model):
         policy_loss=-tf.reduce_mean(clipped_loss)
         value_loss=tf.reduce_mean(tf.square(returns - values)) * 0.5 * self.valueCoefficient
         total_loss=policy_loss+value_loss+entropy_loss
-        print("Total loss: ",total_loss.numpy()," Policy loss: ",policy_loss.numpy()," Value loss: ",value_loss.numpy()," Entropy loss: ",entropy_loss.numpy())
+        #print("Total loss: ",total_loss.numpy()," Policy loss: ",policy_loss.numpy()," Value loss: ",value_loss.numpy()," Entropy loss: ",entropy_loss.numpy())
         return total_loss, approx_kl
     
 
@@ -239,6 +239,7 @@ class PPO(tf.keras.Model):
 
     def evaluate_model(self,episode=10,deterministic=True):
         total_rewards = []
+        total_steps_per_episode=[]
         for i in range(episode):
             frames=[]
 
@@ -252,15 +253,18 @@ class PPO(tf.keras.Model):
                 frames.append(state)
                 cumulative_reward += reward
             total_rewards.append(cumulative_reward)
+            total_steps_per_episode.append(len(frames))
             if self.training:
                 self.recorder.saveRecord(frames,i,True)
             
-            print("Episode reward:", cumulative_reward)
+            print("Episode reward:", cumulative_reward, "Episode steps:", len(frames))
 
         print(f"Average Reward: {np.mean(total_rewards):.2f}")
         print(f"Min Reward: {np.min(total_rewards):.2f}")
         print(f"Max Reward: {np.max(total_rewards):.2f}")
         print(f"Cumulative Reward: {np.sum(total_rewards):.2f}")
+        print("Average steps per episode: ",np.mean(total_steps_per_episode))
+        print("Total Steps: ",np.sum(total_steps_per_episode))
         if self.training:
             self.dataLogger.log({
                 "reward":np.mean(total_rewards),
